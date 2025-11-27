@@ -1,0 +1,32 @@
+smtp:
+    port: 25
+    host: 0.0.0.0
+    domain: localhost
+    max_connections: 100
+    require_auth: true
+pop3:
+    port: 110
+    host: 0.0.0.0
+    max_connections: 50
+imap:
+    port: 143
+    host: 0.0.0.0
+    max_connections: 50
+web:
+    port: 8080
+    host: 0.0.0.0
+users:
+    admin@localhost:
+        password: admin123
+        full_name: Administrator
+    user@localhost:
+        password: user123
+        full_name: Test User
+security:
+    allowed_domains:
+        - localhost
+    max_message_size: 10485760
+    require_auth: true
+storage:
+    data_directory: data
+    log_directory: logs
