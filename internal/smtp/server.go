@@ -8,6 +8,7 @@ import (
 	"log"
 	"mail-server/internal/auth"
 	"mail-server/internal/config"
+	"mail-server/internal/delivery"
 	"mail-server/internal/storage"
 	"net"
 	"strings"
@@ -19,21 +20,18 @@ type Server struct {
 	config        config.SMTPConfig
 	authenticator *auth.Authenticator
 	storage       *storage.Storage
+	delivery      *delivery.Service
 	listener      net.Listener
 }
 
 // NewServer creates a new SMTP server
-func NewServer(cfg config.SMTPConfig) *Server {
-	// Initialize storage
-	store := storage.NewStorage("data")
-
-	// We'll need to pass users from main - for now create a placeholder
-	authenticator := &auth.Authenticator{}
-
+func NewServer(cfg config.SMTPConfig, users map[string]config.User, store *storage.Storage, deliveryService *delivery.Service) *Server {
+	authenticator := auth.NewAuthenticator(users)
 	return &Server{
 		config:        cfg,
 		authenticator: authenticator,
 		storage:       store,
+		delivery:      deliveryService,
 	}
 }
 
@@ -361,9 +359,9 @@ func (session *SMTPSession) processMessage() error {
 	msg.From = session.mailFrom
 	msg.To = session.rcptTo
 
-	// Store the message
-	if err := session.server.storage.StoreMessage(msg); err != nil {
-		log.Printf("Failed to store message: %v", err)
+	// Enqueue message for asynchronous delivery.
+	if _, err := session.server.delivery.Enqueue(msg); err != nil {
+		log.Printf("Failed to enqueue message: %v", err)
 		session.writeLine("451 Temporary failure")
 		return nil
 	}

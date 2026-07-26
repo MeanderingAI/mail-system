@@ -8,8 +8,13 @@ A complete mail server implementation written in Go, supporting SMTP, POP3, IMAP
 - **POP3 Server**: Retrieve emails using POP3 protocol
 - **IMAP Server**: Access emails with folder-based organization
 - **Web Interface**: Browser-based email client with inbox, compose, and profile management
+- **Portrait OAuth Login**: Optional "Login with Portrait" flow for web sign-in
 - **User Authentication**: Secure user management with password verification
 - **File-based Storage**: Email storage with JSON metadata
+- **Outbound Delivery Queue**: Durable queue with retry/backoff and dead-letter handling
+- **Policy Controls**: Domain blacklist checks and per-sender rate throttling
+- **TLS Material Validation**: Optional certificate/key validation for self-hosted TLS paths
+- **DNS Policy Checks**: Optional MX/A reachability and DNSBL lookups via your DNS server
 - **Graceful Shutdown**: Proper server lifecycle management
 
 ## Requirements
@@ -26,6 +31,8 @@ A complete mail server implementation written in Go, supporting SMTP, POP3, IMAP
    ```
 
 ## Configuration
+
+For a complete setup including Portrait OAuth and workspace subrepos, see `SETUP.md`.
 
 The server uses a YAML configuration file. Create a `config.yaml` file in the project root:
 
@@ -51,6 +58,31 @@ web:
   port: 8081
   host: "0.0.0.0"
 
+delivery:
+  queue_directory: "data/outbound-queue"
+  worker_count: 1
+  poll_interval_millis: 1000
+  max_attempts: 6
+  base_retry_delay_seconds: 5
+  max_retry_delay_seconds: 300
+  blocked_sender_domains: []
+  blocked_recipient_domains: []
+  per_sender_rate_limit_per_minute: 120
+  enable_tls_cert_validation: false
+  tls_cert_file: ""
+  tls_key_file: ""
+  enable_dns_policy_checks: false
+  dns_server_address: ""
+  mx_dns_server_address: ""
+  dnsbl_dns_server_address: ""
+  use_system_resolver_for_dnsbl: true
+  dns_lookup_timeout_seconds: 3
+  require_reachable_mx: false
+  dnsbl_zones: []
+  skip_dns_policy_for_domains:
+    - "localhost"
+    - "local"
+
 users:
   user1@localhost:
     password: "password1"
@@ -71,6 +103,16 @@ storage:
 ```
 
 ## Usage
+
+### Split DNS Resolver Mode
+
+When `delivery.enable_dns_policy_checks` is enabled, you can direct lookup types to different resolvers:
+
+- `mx_dns_server_address`: resolver for recipient MX/A reachability checks (for example your local dns-server)
+- `dnsbl_dns_server_address`: resolver for DNSBL zone lookups
+- `use_system_resolver_for_dnsbl`: when true and `dnsbl_dns_server_address` is empty, DNSBL uses the host resolver
+
+If these are empty, the service falls back to `dns_server_address`, then the system resolver.
 
 ### Starting the Server
 
@@ -148,6 +190,7 @@ internal/
 - `internal/config/`: YAML configuration loading
 - `internal/auth/`: User authentication and password verification  
 - `internal/storage/`: File-based email storage with JSON metadata
+- `internal/delivery/`: Queue worker for retryable outbound delivery
 - `internal/smtp/`: SMTP protocol implementation (RFC 5321)
 - `internal/pop3/`: POP3 protocol implementation (RFC 1939)
 - `internal/imap/`: Basic IMAP protocol implementation (RFC 3501)

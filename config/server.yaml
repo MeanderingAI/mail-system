@@ -15,6 +15,41 @@ imap:
 web:
     port: 8080
     host: 0.0.0.0
+    session_secret: replace-with-a-long-random-session-secret
+    oauth:
+        enabled: true
+        client_id: mail-system
+        client_secret: replace-with-a-long-random-secret
+        authorize_url: https://pam.meandering.tel/oauth/authorize
+        token_url: https://pam.meandering.tel/oauth/token
+        userinfo_url: https://pam.meandering.tel/oauth/userinfo
+        redirect_url: https://mail.meandering.tel/auth/portrait/callback
+        scope: profile
+        default_mailbox_user: admin@localhost
+delivery:
+    queue_directory: data/outbound-queue
+    worker_count: 1
+    poll_interval_millis: 1000
+    max_attempts: 6
+    base_retry_delay_seconds: 5
+    max_retry_delay_seconds: 300
+    blocked_sender_domains: []
+    blocked_recipient_domains: []
+    per_sender_rate_limit_per_minute: 120
+    enable_tls_cert_validation: false
+    tls_cert_file: ""
+    tls_key_file: ""
+    enable_dns_policy_checks: false
+    dns_server_address: ""
+    mx_dns_server_address: ""
+    dnsbl_dns_server_address: ""
+    use_system_resolver_for_dnsbl: true
+    dns_lookup_timeout_seconds: 3
+    require_reachable_mx: false
+    dnsbl_zones: []
+    skip_dns_policy_for_domains:
+        - localhost
+        - local
 users:
     admin@localhost:
         password: admin123

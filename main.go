@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"mail-server/internal/config"
+	"mail-server/internal/delivery"
 	"mail-server/internal/imap"
 	"mail-server/internal/pop3"
 	"mail-server/internal/smtp"
+	"mail-server/internal/storage"
 	"mail-server/internal/web"
 	"os"
 	"os/signal"
@@ -35,10 +37,25 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	mailStorage := storage.NewStorage(cfg.Storage.DataDirectory)
+	deliveryService, err := delivery.NewService(cfg.Delivery, mailStorage)
+	if err != nil {
+		log.Fatalf("Failed to initialize delivery service: %v", err)
+	}
+
 	var wg sync.WaitGroup
 
+	// Start Delivery worker
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := deliveryService.Start(ctx); err != nil {
+			log.Printf("Delivery worker error: %v", err)
+		}
+	}()
+
 	// Start SMTP server
-	smtpServer := smtp.NewServer(cfg.SMTP)
+	smtpServer := smtp.NewServer(cfg.SMTP, cfg.Users, mailStorage, deliveryService)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -71,7 +88,7 @@ func main() {
 	}()
 
 	// Start Web server
-	webServer := web.NewServer(cfg.Web, cfg.Users)
+	webServer := web.NewServer(cfg.Web, cfg.Users, mailStorage, deliveryService)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

@@ -2,14 +2,21 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"mail-server/internal/auth"
 	"mail-server/internal/config"
+	"mail-server/internal/delivery"
 	"mail-server/internal/storage"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -21,25 +28,34 @@ type Server struct {
 	config        config.WebConfig
 	authenticator *auth.Authenticator
 	storage       *storage.Storage
+	delivery      *delivery.Service
 	store         *sessions.CookieStore
 	server        *http.Server
 }
 
 // NewServer creates a new web server
-func NewServer(cfg config.WebConfig, users map[string]config.User) *Server {
-	// Initialize storage
-	store := storage.NewStorage("data")
-
+func NewServer(cfg config.WebConfig, users map[string]config.User, store *storage.Storage, deliveryService *delivery.Service) *Server {
 	// Initialize authenticator
 	authenticator := auth.NewAuthenticator(users)
+	sessionSecret := cfg.SessionSecret
+	if strings.TrimSpace(sessionSecret) == "" {
+		sessionSecret = "replace-with-a-long-random-session-secret"
+	}
 
 	// Initialize session store
-	sessionStore := sessions.NewCookieStore([]byte("your-secret-key"))
+	sessionStore := sessions.NewCookieStore([]byte(sessionSecret))
+	sessionStore.Options = &sessions.Options{
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400,
+	}
 
 	return &Server{
 		config:        cfg,
 		authenticator: authenticator,
 		storage:       store,
+		delivery:      deliveryService,
 		store:         sessionStore,
 	}
 }
@@ -53,11 +69,14 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Web interface
 	router.HandleFunc("/", s.handleIndex).Methods("GET")
+	router.HandleFunc("/auth/portrait/login", s.handlePortraitLogin).Methods("GET")
+	router.HandleFunc("/auth/portrait/callback", s.handlePortraitCallback).Methods("GET")
 
 	// API routes
 	api := router.PathPrefix("/api").Subrouter()
 	api.HandleFunc("/auth/login", s.handleLogin).Methods("POST")
 	api.HandleFunc("/auth/logout", s.handleLogout).Methods("POST")
+	api.HandleFunc("/auth/session", s.handleSession).Methods("GET")
 
 	// Protected API routes
 	protected := api.PathPrefix("").Subrouter()
@@ -166,6 +185,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
                     <input type="password" id="password" name="password" required value="admin123">
                 </div>
                 <button type="submit" class="btn">Login</button>
+                {{if .OAuthEnabled}}
+                <div style="margin: 18px 0; text-align: center; color: #666;">or</div>
+                <a class="btn" href="/auth/portrait/login" style="width: 100%; text-align: center;">Login with Portrait</a>
+                {{end}}
             </form>
         </div>
 
@@ -251,7 +274,26 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
         document.addEventListener('DOMContentLoaded', function() {
             setupEventListeners();
+            checkSession();
         });
+
+        async function checkSession() {
+            try {
+                const response = await fetch('/api/auth/session');
+                if (!response.ok) {
+                    showLogin();
+                    return;
+                }
+
+                const data = await response.json();
+                currentUser = data.user;
+                showMailInterface();
+                loadProfile();
+                loadInbox();
+            } catch (err) {
+                showLogin();
+            }
+        }
 
         function setupEventListeners() {
             document.getElementById('login-form').addEventListener('submit', handleLogin);
@@ -496,7 +538,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html")
-	t.Execute(w, nil)
+	t.Execute(w, map[string]bool{"OAuthEnabled": s.oauthEnabled()})
 }
 
 // authMiddleware checks for valid session
@@ -516,6 +558,225 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) oauthEnabled() bool {
+	return s.config.OAuth.Enabled &&
+		s.config.OAuth.ClientID != "" &&
+		s.config.OAuth.AuthorizeURL != "" &&
+		s.config.OAuth.TokenURL != "" &&
+		s.config.OAuth.UserInfoURL != "" &&
+		s.config.OAuth.RedirectURL != ""
+}
+
+// handleSession returns the currently authenticated session user.
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	session, _ := s.store.Get(r, "mail-session")
+	username, ok := session.Values["username"].(string)
+	if !ok || username == "" {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	fullName, _ := session.Values["fullName"].(string)
+	if fullName == "" {
+		if user, exists := s.authenticator.GetUser(username); exists {
+			fullName = user.FullName
+		} else {
+			fullName = username
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"user": map[string]string{
+			"username": username,
+			"fullName": fullName,
+		},
+	})
+}
+
+// handlePortraitLogin starts OAuth authorization with portrait_user_management.
+func (s *Server) handlePortraitLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.oauthEnabled() {
+		http.Error(w, "Portrait OAuth is not configured", http.StatusNotFound)
+		return
+	}
+
+	stateBytes := make([]byte, 16)
+	if _, err := rand.Read(stateBytes); err != nil {
+		http.Error(w, "Failed to start OAuth login", http.StatusInternalServerError)
+		return
+	}
+	state := hex.EncodeToString(stateBytes)
+
+	session, _ := s.store.Get(r, "mail-session")
+	session.Values["oauth_state"] = state
+	if err := session.Save(r, w); err != nil {
+		http.Error(w, "Failed to save session", http.StatusInternalServerError)
+		return
+	}
+
+	scope := strings.TrimSpace(s.config.OAuth.Scope)
+	if scope == "" {
+		scope = "profile"
+	}
+
+	authorizeURL, err := url.Parse(s.config.OAuth.AuthorizeURL)
+	if err != nil {
+		http.Error(w, "Invalid authorize URL", http.StatusInternalServerError)
+		return
+	}
+
+	query := authorizeURL.Query()
+	query.Set("response_type", "code")
+	query.Set("client_id", s.config.OAuth.ClientID)
+	query.Set("redirect_uri", s.config.OAuth.RedirectURL)
+	query.Set("scope", scope)
+	query.Set("state", state)
+	authorizeURL.RawQuery = query.Encode()
+
+	http.Redirect(w, r, authorizeURL.String(), http.StatusFound)
+}
+
+// handlePortraitCallback exchanges the OAuth code and creates a mail session.
+func (s *Server) handlePortraitCallback(w http.ResponseWriter, r *http.Request) {
+	if !s.oauthEnabled() {
+		http.Error(w, "Portrait OAuth is not configured", http.StatusNotFound)
+		return
+	}
+
+	if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
+		http.Error(w, fmt.Sprintf("OAuth failed: %s", oauthErr), http.StatusUnauthorized)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	if code == "" || state == "" {
+		http.Error(w, "Missing OAuth callback parameters", http.StatusBadRequest)
+		return
+	}
+
+	session, _ := s.store.Get(r, "mail-session")
+	expectedState, _ := session.Values["oauth_state"].(string)
+	if expectedState == "" || expectedState != state {
+		http.Error(w, "Invalid OAuth state", http.StatusUnauthorized)
+		return
+	}
+
+	accessToken, err := s.exchangePortraitCode(code)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("OAuth token exchange failed: %v", err), http.StatusUnauthorized)
+		return
+	}
+
+	username, fullName, err := s.fetchPortraitIdentity(accessToken)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load profile: %v", err), http.StatusUnauthorized)
+		return
+	}
+
+	session.Values["username"] = username
+	session.Values["fullName"] = fullName
+	delete(session.Values, "oauth_state")
+	if err := session.Save(r, w); err != nil {
+		http.Error(w, "Failed to save session", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (s *Server) exchangePortraitCode(code string) (string, error) {
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", s.config.OAuth.RedirectURL)
+
+	if s.config.OAuth.ClientSecret == "" {
+		form.Set("client_id", s.config.OAuth.ClientID)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, s.config.OAuth.TokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	if s.config.OAuth.ClientSecret != "" {
+		credentials := s.config.OAuth.ClientID + ":" + s.config.OAuth.ClientSecret
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)))
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", err
+	}
+	if tokenResp.AccessToken == "" {
+		return "", fmt.Errorf("token response missing access_token")
+	}
+
+	return tokenResp.AccessToken, nil
+}
+
+func (s *Server) fetchPortraitIdentity(accessToken string) (string, string, error) {
+	req, err := http.NewRequest(http.MethodGet, s.config.OAuth.UserInfoURL, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("userinfo endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var userInfo struct {
+		Subject string `json:"sub"`
+		Name    string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &userInfo); err != nil {
+		return "", "", err
+	}
+
+	username := strings.TrimSpace(s.config.OAuth.DefaultMailboxUser)
+	if username == "" {
+		subject := strings.TrimSpace(userInfo.Subject)
+		subject = strings.ReplaceAll(subject, "@", "-")
+		if subject == "" {
+			subject = "portrait-user"
+		}
+		username = subject + "@portrait.local"
+	}
+
+	fullName := strings.TrimSpace(userInfo.Name)
+	if fullName == "" {
+		fullName = username
+	}
+
+	return username, fullName, nil
+}
+
 // handleLogin handles user login
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -531,9 +792,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.authenticator.Authenticate(req.Username, req.Password) {
 		session, _ := s.store.Get(r, "mail-session")
 		session.Values["username"] = req.Username
-		session.Save(r, w)
-
 		user, _ := s.authenticator.GetUser(req.Username)
+		session.Values["fullName"] = user.FullName
+		session.Save(r, w)
 
 		response := map[string]interface{}{
 			"user": map[string]string{
@@ -553,6 +814,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	session, _ := s.store.Get(r, "mail-session")
 	session.Values["username"] = ""
+	session.Values["fullName"] = ""
 	session.Options.MaxAge = -1
 	session.Save(r, w)
 
@@ -641,8 +903,8 @@ func (s *Server) handleSendMail(w http.ResponseWriter, r *http.Request) {
 		Flags:     []string{},
 	}
 
-	if err := s.storage.StoreMessage(message); err != nil {
-		http.Error(w, "Failed to send email", http.StatusInternalServerError)
+	if _, err := s.delivery.Enqueue(message); err != nil {
+		http.Error(w, "Failed to enqueue email", http.StatusInternalServerError)
 		return
 	}
 
@@ -656,17 +918,23 @@ func (s *Server) handleSendMail(w http.ResponseWriter, r *http.Request) {
 // handleGetProfile returns user profile
 func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 	username := r.Context().Value("username").(string)
+	session, _ := s.store.Get(r, "mail-session")
+	sessionFullName, _ := session.Values["fullName"].(string)
 
 	user, exists := s.authenticator.GetUser(username)
-	if !exists {
-		http.Error(w, "User not found", http.StatusNotFound)
-		return
+	fullName := sessionFullName
+	if fullName == "" {
+		if exists {
+			fullName = user.FullName
+		} else {
+			fullName = username
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"username": username,
-		"fullName": user.FullName,
+		"fullName": fullName,
 	})
 }
 

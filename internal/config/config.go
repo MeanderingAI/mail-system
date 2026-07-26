@@ -14,6 +14,7 @@ type Config struct {
 	POP3     POP3Config      `yaml:"pop3"`
 	IMAP     IMAPConfig      `yaml:"imap"`
 	Web      WebConfig       `yaml:"web"`
+	Delivery DeliveryConfig  `yaml:"delivery"`
 	Users    map[string]User `yaml:"users"`
 	Security SecurityConfig  `yaml:"security"`
 	Storage  StorageConfig   `yaml:"storage"`
@@ -44,8 +45,48 @@ type IMAPConfig struct {
 
 // WebConfig contains web server configuration
 type WebConfig struct {
-	Port int    `yaml:"port"`
-	Host string `yaml:"host"`
+	Port          int            `yaml:"port"`
+	Host          string         `yaml:"host"`
+	SessionSecret string         `yaml:"session_secret"`
+	OAuth         WebOAuthConfig `yaml:"oauth"`
+}
+
+// WebOAuthConfig contains OAuth login configuration for the web UI
+type WebOAuthConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	ClientID           string `yaml:"client_id"`
+	ClientSecret       string `yaml:"client_secret"`
+	AuthorizeURL       string `yaml:"authorize_url"`
+	TokenURL           string `yaml:"token_url"`
+	UserInfoURL        string `yaml:"userinfo_url"`
+	RedirectURL        string `yaml:"redirect_url"`
+	Scope              string `yaml:"scope"`
+	DefaultMailboxUser string `yaml:"default_mailbox_user"`
+}
+
+// DeliveryConfig contains outbound delivery queue settings
+type DeliveryConfig struct {
+	QueueDirectory              string   `yaml:"queue_directory"`
+	WorkerCount                 int      `yaml:"worker_count"`
+	PollIntervalMillis          int      `yaml:"poll_interval_millis"`
+	MaxAttempts                 int      `yaml:"max_attempts"`
+	BaseRetryDelaySeconds       int      `yaml:"base_retry_delay_seconds"`
+	MaxRetryDelaySeconds        int      `yaml:"max_retry_delay_seconds"`
+	BlockedSenderDomains        []string `yaml:"blocked_sender_domains"`
+	BlockedRecipientDomains     []string `yaml:"blocked_recipient_domains"`
+	PerSenderRateLimitPerMinute int      `yaml:"per_sender_rate_limit_per_minute"`
+	EnableTLSCertValidation     bool     `yaml:"enable_tls_cert_validation"`
+	TLSCertFile                 string   `yaml:"tls_cert_file"`
+	TLSKeyFile                  string   `yaml:"tls_key_file"`
+	EnableDNSPolicyChecks       bool     `yaml:"enable_dns_policy_checks"`
+	DNSServerAddress            string   `yaml:"dns_server_address"`
+	MXDNSServerAddress          string   `yaml:"mx_dns_server_address"`
+	DNSBLDNSServerAddress       string   `yaml:"dnsbl_dns_server_address"`
+	UseSystemResolverForDNSBL   bool     `yaml:"use_system_resolver_for_dnsbl"`
+	DNSLookupTimeoutSeconds     int      `yaml:"dns_lookup_timeout_seconds"`
+	RequireReachableMX          bool     `yaml:"require_reachable_mx"`
+	DNSBLZones                  []string `yaml:"dnsbl_zones"`
+	SkipDNSPolicyForDomains     []string `yaml:"skip_dns_policy_for_domains"`
 }
 
 // User represents a user account
@@ -89,8 +130,43 @@ func Load(filename string) (*Config, error) {
 			MaxConnections: 50,
 		},
 		Web: WebConfig{
-			Port: 8080,
-			Host: "0.0.0.0",
+			Port:          8080,
+			Host:          "0.0.0.0",
+			SessionSecret: "replace-with-a-long-random-session-secret",
+			OAuth: WebOAuthConfig{
+				Enabled:            false,
+				ClientID:           "",
+				ClientSecret:       "",
+				AuthorizeURL:       "https://pam.meandering.tel/oauth/authorize",
+				TokenURL:           "https://pam.meandering.tel/oauth/token",
+				UserInfoURL:        "https://pam.meandering.tel/oauth/userinfo",
+				RedirectURL:        "http://localhost:8081/auth/portrait/callback",
+				Scope:              "profile",
+				DefaultMailboxUser: "admin@localhost",
+			},
+		},
+		Delivery: DeliveryConfig{
+			QueueDirectory:              "data/outbound-queue",
+			WorkerCount:                 1,
+			PollIntervalMillis:          1000,
+			MaxAttempts:                 6,
+			BaseRetryDelaySeconds:       5,
+			MaxRetryDelaySeconds:        300,
+			BlockedSenderDomains:        []string{},
+			BlockedRecipientDomains:     []string{},
+			PerSenderRateLimitPerMinute: 120,
+			EnableTLSCertValidation:     false,
+			TLSCertFile:                 "",
+			TLSKeyFile:                  "",
+			EnableDNSPolicyChecks:       false,
+			DNSServerAddress:            "",
+			MXDNSServerAddress:          "",
+			DNSBLDNSServerAddress:       "",
+			UseSystemResolverForDNSBL:   true,
+			DNSLookupTimeoutSeconds:     3,
+			RequireReachableMX:          false,
+			DNSBLZones:                  []string{},
+			SkipDNSPolicyForDomains:     []string{"localhost", "local"},
 		},
 		Users: map[string]User{
 			"admin@localhost": {
