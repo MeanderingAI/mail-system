@@ -68,6 +68,7 @@ func (s *Server) Start(ctx context.Context) error {
 	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("web/static/"))))
 
 	// Web interface
+	router.HandleFunc("/favicon.svg", handleFavicon).Methods("GET")
 	router.HandleFunc("/", s.handleIndex).Methods("GET")
 	router.HandleFunc("/auth/portrait/login", s.handlePortraitLogin).Methods("GET")
 	router.HandleFunc("/auth/portrait/callback", s.handlePortraitCallback).Methods("GET")
@@ -121,6 +122,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mail Server - Web Client</title>
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; background-color: #f5f5f5; }
@@ -539,6 +541,18 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html")
 	t.Execute(w, map[string]bool{"OAuthEnabled": s.oauthEnabled()})
+}
+
+func handleFavicon(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+	<rect width="64" height="64" rx="12" fill="#00b8f0"/>
+	<rect x="9" y="16" width="46" height="34" rx="6" fill="#fff"/>
+	<path d="M11 20l21 17 21-17v8L32 45 11 28z" fill="#ffe135"/>
+	<circle cx="50" cy="15" r="9" fill="#ff2d8f"/>
+	<path d="M46 15h8M50 11v8" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+</svg>`))
 }
 
 // authMiddleware checks for valid session
