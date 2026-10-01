@@ -104,10 +104,19 @@ Login options:
 
 ## 6. Optional: expose mail-system via domain
 
-If serving at `https://mail.meandering.tel`, ensure reverse-proxy routing forwards:
+mail-system has no built-in TLS, so `https://mail.meandering.tel` requires an nginx
+reverse proxy in front of it with a real certificate. From the workspace root on a
+Linux host:
 
-- `/` to mail-system web port
-- `/auth/portrait/callback` to mail-system web port
+```bash
+bash ./scripts/selfdeploy_mail_ssl_linux.sh mail.meandering.tel admin@meandering.tel
+```
+
+This builds the Go binary, installs it as the `mail-system.service` systemd unit,
+configures nginx to forward `/` (including `/auth/portrait/callback`) to the web
+port, and obtains/renews a Let's Encrypt certificate via certbot. Without this (or
+an equivalent manually-configured reverse proxy with a valid certificate), browsers
+will show a "connection is not private" warning when visiting the site over HTTPS.
 
 ## 7. Verify OAuth flow
 
